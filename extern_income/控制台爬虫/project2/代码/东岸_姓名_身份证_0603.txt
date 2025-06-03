@@ -1,0 +1,222 @@
+// == 大容量Element UI表格爬虫（每页500条）==
+(async function() {
+    // ========== 配置区 ==========
+    const CONFIG = {
+        DELAY: 5000,            // 翻页等待时间延长至5秒
+        MAX_RETRY: 5,           // 增加最大重试次数
+        CSV_PREFIX: '用户数据',  // 导出文件名前缀
+        PAGE_SIZE: 500,         // 明确指定每页500条
+        COLUMN_MAP: {           // 列定义
+            姓名: 'el-table_2_column_8',
+            证件号: 'el-table_2_column_9',
+            业务员: 'el-table_2_column_20',
+        }
+    };
+
+    // ========== 核心函数 ==========
+    function extractData() {
+        console.log('开始提取当前页数据...');
+        const data = [];
+        let processedCount = 0;
+        
+        // 分批处理DOM节点避免内存问题
+        const processBatch = (rows, batchSize = 50) => {
+            for (let i = 0; i < rows.length; i += batchSize) {
+                const batch = Array.from(rows).slice(i, i + batchSize);
+                batch.forEach(row => {
+                    const item = {};
+                    let hasData = false;
+                    
+                    for (const [field, className] of Object.entries(CONFIG.COLUMN_MAP)) {
+                        const cell = row.querySelector(`td.${className} .cell`);
+                        if (cell) {
+                            item[field] = cell.textContent.trim();
+                            if (item[field]) hasData = true;
+                        }
+                    }
+                    
+                    // 证件号特殊处理
+                    if (item.证件号) {
+                        item.证件号 = item.证件号.replace(/[,\s]/g, '');
+                    }
+                    
+                    if (hasData) {
+                        data.push(item);
+                        processedCount++;
+                    }
+                });
+                
+                // 定期释放内存
+                if (i % 200 === 0) {
+                    console.log(`已处理 ${processedCount} 条数据...`);
+                    if (typeof gc === 'function') gc(); // 如果环境支持GC，尝试触发垃圾回收
+                }
+            }
+        };
+        
+        const rows = document.querySelectorAll('tr.el-table__row');
+        console.log(`找到 ${rows.length} 行数据`);
+        
+        // 分批处理大数据量
+        processBatch(rows);
+        console.log(`提取完成: 共 ${data.length} 条数据`);
+        return data;
+    }
+
+    async function gotoNextPage() {
+        const nextBtn = document.querySelector('.el-pagination .btn-next:not(.disabled)');
+        if (nextBtn) {
+            // 滚动到分页控件位置确保点击有效
+            nextBtn.scrollIntoView({behavior: 'smooth', block: 'center'});
+            await new Promise(r => setTimeout(r, 500));
+            
+            nextBtn.click();
+            // 延长等待时间确保大数据量加载完成
+            await new Promise(r => setTimeout(r, CONFIG.DELAY));
+            return true;
+        }
+        return false;
+    }
+
+    function getTotalPages() {
+        const totalText = document.querySelector('.el-pagination__total')?.textContent;
+        if (totalText) {
+            const match = totalText.match(/共\s*(\d+)\s*条/);
+            if (match) {
+                return Math.ceil(parseInt(match[1]) / CONFIG.PAGE_SIZE);
+            }
+        }
+        return 1;
+    }
+
+    function exportCSV(data) {
+        // 优化大数据量去重性能
+        console.log('开始去重处理...');
+        const uniqueMap = new Map();
+        data.forEach(item => {
+            const key = `${item.姓名}|${item.证件号}`;
+            if (!uniqueMap.has(key)) {
+                uniqueMap.set(key, item);
+            }
+        });
+        
+        const uniqueData = Array.from(uniqueMap.values());
+        console.log(`去重完成: 原始 ${data.length} 条 → 去重后 ${uniqueData.length} 条`);
+
+        // 分批生成CSV内容避免内存溢出
+        console.log('开始生成CSV文件...');
+        const headers = Object.keys(CONFIG.COLUMN_MAP).join(',');
+        const batchSize = 10000;
+        let csvContent = '\uFEFF' + headers + '\n';
+        
+        for (let i = 0; i < uniqueData.length; i += batchSize) {
+            const batch = uniqueData.slice(i, i + batchSize);
+            csvContent += batch.map(item => 
+                Object.values(item)
+                    .map(v => `"${v.replace(/"/g, '""')}"`)
+                    .join(',')
+            ).join('\n') + '\n';
+            
+            console.log(`已生成 ${Math.min(i + batchSize, uniqueData.length)}/${uniqueData.length} 条数据`);
+        }
+
+        // 使用Blob分片处理大文件
+        console.log('准备导出文件...');
+        const blobParts = [];
+        const chunkSize = 10 * 1024 * 1024; // 10MB分片
+        for (let i = 0; i < csvContent.length; i += chunkSize) {
+            blobParts.push(csvContent.slice(i, i + chunkSize));
+        }
+        
+        const blob = new Blob(blobParts, { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${CONFIG.CSV_PREFIX}_${new Date().toISOString().slice(0,10)}_${uniqueData.length}条.csv`;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }, 100);
+        
+        console.log(`导出完成: ${uniqueData.length}条数据`);
+    }
+
+    // ========== 执行流程 ==========
+    console.log('=== 大容量表格爬虫启动 ===');
+    const startTime = Date.now();
+    let allData = [];
+    let currentPage = 1;
+    const totalPages = getTotalPages();
+    
+    console.log(`总页数: ${totalPages}, 每页 ${CONFIG.PAGE_SIZE} 条`);
+
+    while (currentPage <= totalPages) {
+        let retry = 0;
+        let success = false;
+        
+        while (retry < CONFIG.MAX_RETRY) {
+            try {
+                console.log(`[第${currentPage}/${totalPages}页] 尝试${retry+1}/${CONFIG.MAX_RETRY}`);
+                
+                // 检查DOM是否已加载
+                await new Promise(r => setTimeout(r, 1000));
+                if (!document.querySelector('tr.el-table__row')) {
+                    throw new Error('数据行未加载完成');
+                }
+                
+                // 提取数据
+                const pageData = extractData();
+                if (pageData.length === 0) {
+                    throw new Error('未提取到数据');
+                }
+                
+                // 合并数据
+                allData = [...allData, ...pageData];
+                console.log(`累计数据量: ${allData.length} 条`);
+                
+                // 尝试翻页
+                success = await gotoNextPage();
+                if (!success) {
+                    console.log('=== 已到最后一页 ===');
+                    currentPage = Infinity;
+                } else {
+                    currentPage++;
+                }
+                break;
+                
+            } catch (e) {
+                console.warn(`[错误] ${e.message}`);
+                retry++;
+                // 指数退避重试
+                await new Promise(r => setTimeout(r, 2000 * Math.pow(2, retry - 1)));
+            }
+        }
+        
+        if (!success && retry >= CONFIG.MAX_RETRY) {
+            console.error('=== 连续失败终止 ===');
+            break;
+        }
+        
+        // 定期保存进度
+        if (currentPage % 5 === 0 || currentPage > totalPages) {
+            console.log('=== 保存当前进度 ===');
+            localStorage.setItem('crawler_progress', JSON.stringify({
+                page: currentPage,
+                data: allData,
+                timestamp: Date.now()
+            }));
+        }
+    }
+
+    // 导出结果
+    if (allData.length > 0) {
+        console.log('=== 准备导出数据 ===');
+        exportCSV(allData);
+        console.log(`总耗时: ${((Date.now()-startTime)/1000).toFixed(1)}秒`);
+        localStorage.removeItem('crawler_progress');
+    } else {
+        console.warn('=== 未获取到有效数据 ===');
+    }
+})();

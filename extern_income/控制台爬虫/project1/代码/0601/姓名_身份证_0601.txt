@@ -1,0 +1,117 @@
+// == 浏览器控制台自动分页爬虫（完整去重版）==
+(async function() {
+    // ========== 配置区 ==========
+    const CONFIG = {
+        DELAY: 2500,            // 翻页等待时间(毫秒)
+        MAX_RETRY: 3,           // 最大重试次数
+        PAGE_SIZE: 500,         // 每页显示数量
+        CSV_PREFIX: '用户数据'   // 导出文件名前缀
+    };
+
+    // ========== 核心函数 ==========
+    function extractData() {
+        return Array.from(document.querySelectorAll('tr.el-table__row')).map(row => {
+            const nameSpan = row.querySelector('.el-table_2_column_14 span');
+            const idSpan = row.querySelector('.el-table_2_column_15 span');
+            return {
+                姓名: nameSpan?.innerText?.trim() || '',
+                身份证号: (idSpan?.innerText || '').replace(/,/g, '').trim()
+            };
+        }).filter(item => item.姓名 && item.身份证号);
+    }
+
+    async function gotoNextPage() {
+        const nextBtn = document.querySelector('.btn-next:not([disabled])');
+        if (nextBtn) {
+            nextBtn.click();
+            return true;
+        }
+        return false;
+    }
+
+    function calculateTotalPages() {
+        const totalText = document.querySelector('.el-pagination__total').innerText;
+        return Math.ceil(parseInt(totalText.match(/\d+/)[0]) / CONFIG.PAGE_SIZE);
+    }
+
+    function exportCSV(data) {
+        // 去重逻辑
+        const uniqueMap = new Map();
+        data.forEach(item => {
+            const key = `${item.姓名}|${item.身份证号}`;
+            if (!uniqueMap.has(key)) uniqueMap.set(key, item);
+        });
+
+        // 生成CSV
+        const csv = ['\uFEFF姓名,身份证号'];
+        uniqueMap.forEach(value => {
+            csv.push(`"${value.姓名.replace(/"/g, '""')}",${value.身份证号}`);
+        });
+
+        // 触发下载
+        const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `${CONFIG.CSV_PREFIX}_去重${uniqueMap.size}条.csv`;
+        link.click();
+    }
+
+    // ========== 执行流程 ==========
+    console.log('=== 爬虫启动 ===');
+    const startTime = Date.now();
+    let allData = [];
+    let currentPage = 1;
+    const totalPages = calculateTotalPages();
+    console.log(`总页数: ${totalPages}, 每页: ${CONFIG.PAGE_SIZE}条`);
+
+    while (currentPage <= totalPages) {
+        let retry = 0;
+        let success = false;
+
+        while (retry < CONFIG.MAX_RETRY) {
+            try {
+                console.log(`[第${currentPage}页] 尝试${retry+1}/${CONFIG.MAX_RETRY}`);
+                
+                // 数据提取
+                const pageData = extractData();
+                if (pageData.length === 0) throw new Error('未找到数据');
+                
+                // 数据合并
+                allData = [...allData, ...pageData];
+                console.log(`[进度] 第${currentPage}页 新增${pageData.length}条 累计${allData.length}条`);
+                
+                // 翻页操作
+                success = await gotoNextPage();
+                if (!success) {
+                    console.log('=== 已到达最后一页 ===');
+                    currentPage = Infinity;
+                } else {
+                    await new Promise(r => setTimeout(r, CONFIG.DELAY + Math.random()*1000));
+                    currentPage++;
+                }
+                break;
+
+            } catch (e) {
+                console.warn(`[错误] ${e.message}`);
+                retry++;
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+
+        if (!success && retry >= CONFIG.MAX_RETRY) {
+            console.error('=== 因连续失败终止 ===');
+            break;
+        }
+    }
+
+    // 最终导出
+    if (allData.length > 0) {
+        console.log('=== 正在生成文件 ===');
+        exportCSV(allData);
+        const uniqueCount = new Set(allData.map(d => `${d.姓名}|${d.身份证号}`)).size;
+        console.log(`原始数据:${allData.length}条 去重后:${uniqueCount}条`);
+        console.log(`=== 完成! 总耗时: ${((Date.now()-startTime)/1000).toFixed(1)}秒 ===`);
+    } else {
+        console.warn('=== 未获取到有效数据 ===');
+    }
+})();

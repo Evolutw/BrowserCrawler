@@ -1,0 +1,184 @@
+// == 浏览器控制台自动分页爬虫（多字段版）==
+(async function() {
+    // ========== 配置区 ==========
+    const CONFIG = {
+        DELAY: 2500,            // 翻页等待时间(毫秒)
+        MAX_RETRY: 5,           // 最大重试次数
+        PAGE_SIZE: 500,         // 每页显示数量
+        CSV_PREFIX: '用户数据'   // 导出文件名前缀
+    };
+
+    // ========== 核心函数 ==========
+    function extractData() {
+        return Array.from(document.querySelectorAll('tr.el-table__row')).map(row => {
+            // 按列顺序提取数据
+            const assetPack = row.querySelector('.el-table_2_column_7 span')?.innerText?.trim() || '';
+            const name = row.querySelector('.el-table_2_column_13 span')?.innerText?.trim() || '';
+            const idRaw = row.querySelector('.el-table_2_column_14 span')?.innerText || '';
+            const totalPrincipal = row.querySelector('.el-table_2_column_15 span')?.innerText || '';
+            const totalTransfer = row.querySelector('.el-table_2_column_16 span')?.innerText || '';
+            const salesman = row.querySelector('.el-table_2_column_18 span')?.innerText?.trim() || '';
+
+            return {
+                // 按列顺序排列
+                "债券资产包": assetPack,
+                "姓名": name,
+                "身份证号": idRaw.replace(/,/g, '').trim(),
+                "总代还本金": totalPrincipal.replace(/[^0-9.]/g, ''),
+                "总债转金额": totalTransfer.replace(/[^0-9.]/g, ''),
+                "业务员": salesman // 新增业务员字段
+            };
+        }).filter(item => item.姓名 && item.身份证号 && !item.业务员); // 只保留业务员为空的数据
+    }
+
+    async function gotoNextPage() {
+        const nextBtn = document.querySelector('.btn-next:not([disabled])');
+        if (nextBtn) {
+            nextBtn.click();
+            await waitForElementChange('tr.el-table__row', 10000); // 等待新页面数据加载完成
+            return true;
+        }
+        return false;
+    }
+
+    function calculateTotalPages() {
+        const totalText = document.querySelector('.el-pagination__total').innerText;
+        const total = parseInt(totalText.match(/\d+/)[0]);
+        return Math.ceil(total / CONFIG.PAGE_SIZE);
+    }
+
+    function exportCSV(data) {
+        // 按字段顺序定义CSV列
+        const csv = ['\uFEFF债券资产包,姓名,身份证号,总代还本金,总债转金额,业务员'];
+        
+        data.forEach(item => {
+            const line = [
+                `"${item.债券资产包.replace(/"/g, '""')}"`,
+                `"${item.姓名.replace(/"/g, '""')}"`,
+                item.身份证号,
+                item.总代还本金,
+                item.总债转金额,
+                `"${item.业务员.replace(/"/g, '""')}"` // 新增业务员字段
+            ].join(',');
+            csv.push(line);
+        });
+        
+        const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `${CONFIG.CSV_PREFIX}_完整数据_${new Date().toISOString().slice(0,10)}.csv`;
+        link.click();
+    }
+
+    // ========== 执行流程 ==========
+    console.log('=== 爬虫启动 ===');
+    const startTime = Date.now();
+    let allData = [];
+    let currentPage = 1;
+    const totalPages = calculateTotalPages();
+    console.log(`总页数: ${totalPages}, 每页: ${CONFIG.PAGE_SIZE}条`);
+
+    while (currentPage <= totalPages) {
+        let retry = 0;
+        let success = false;
+
+        while (retry < CONFIG.MAX_RETRY) {
+            try {
+                console.log(`[第${currentPage}页] 尝试${retry+1}/${CONFIG.MAX_RETRY}`);
+                
+                // 等待数据加载完成
+                await waitForElement('tr.el-table__row', 10000);
+                
+                const pageData = extractData();
+                if (pageData.length === 0) {
+                    console.log(`[警告] 第${currentPage}页未找到数据，继续下一页`);
+                    // 未找到数据时，直接进行翻页操作
+                    success = await gotoNextPage();
+                    if (!success) {
+                        console.log('=== 翻页失败，终止 ===');
+                        currentPage = Infinity;
+                    } else {
+                        await new Promise(r => setTimeout(r, CONFIG.DELAY + Math.random()*1000));
+                        currentPage++;
+                    }
+                    break; // 跳出内层循环，继续外层循环
+                }
+                
+                allData = [...allData, ...pageData];
+                console.log(`[成功] 第${currentPage}页 获取${pageData.length}条 累计${allData.length}条`);
+                
+                // 如果是最后一页，直接终止
+                if (currentPage >= totalPages) {
+                    console.log('=== 已遍历完所有数据 ===');
+                    currentPage = Infinity;
+                    break;
+                }
+
+                // 尝试翻页
+                success = await gotoNextPage();
+                if (!success) {
+                    console.log('=== 翻页失败，终止 ===');
+                    currentPage = Infinity;
+                } else {
+                    await new Promise(r => setTimeout(r, CONFIG.DELAY + Math.random()*1000));
+                    currentPage++;
+                }
+                break;
+
+            } catch (e) {
+                console.warn(`[错误] ${e.message}`);
+                retry++;
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+
+        if (!success && retry >= CONFIG.MAX_RETRY) {
+            console.error('=== 因连续失败终止 ===');
+            break;
+        }
+    }
+
+    // 最终导出
+    if (allData.length > 0) {
+        console.log('=== 正在生成文件 ===');
+        exportCSV(allData);
+        console.log(`=== 完成! 总耗时: ${((Date.now()-startTime)/1000).toFixed(1)}秒 ===`);
+    } else {
+        console.warn('=== 未获取到有效数据 ===');
+    }
+
+    // ========== 工具函数 ==========
+    function waitForElement(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const check = () => {
+                if (document.querySelector(selector)) {
+                    resolve();
+                } else if (Date.now() - start > timeout) {
+                    reject(new Error(`元素加载超时: ${selector}`));
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
+    }
+
+    function waitForElementChange(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const initialContent = document.querySelector(selector)?.innerText || '';
+            const check = () => {
+                const currentContent = document.querySelector(selector)?.innerText || '';
+                if (currentContent !== initialContent) {
+                    resolve();
+                } else if (Date.now() - start > timeout) {
+                    reject(new Error(`元素内容未变化: ${selector}`));
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
+    }
+})();
