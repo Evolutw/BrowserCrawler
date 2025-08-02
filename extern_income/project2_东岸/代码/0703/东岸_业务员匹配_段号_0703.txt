@@ -29,6 +29,8 @@
     document.body.appendChild(input);
 
     let excelData = [], excelHeaders = [], excelMap = new Map();
+    const allExcelKeys = new Set(); // 新增：记录所有Excel键
+    
     try {
         const { headers, data } = await new Promise(resolve => {
             input.onchange = async function(e) {
@@ -57,19 +59,16 @@
         excelHeaders = headers.map((h, i) => h || '列' + (i + 1));
         
         // 使用姓名+证件号数字作为匹配键
-        const uniqueSet = new Set();
         data.forEach(row => {
             if (row.length < 2) return;
             
-            const name = String(row[0] || '').trim();
-            const id = String(row[1] || '').replace(/\D/g, '');
+            const name = String(row[0] || '').trim().toLowerCase();
+            const id = String(row[1] || '').replace(/\D/g, '').toLowerCase();
             
             if (name && id) {
-                const key = `${name}|${id}`;
-                if (!uniqueSet.has(key)) {
-                    uniqueSet.add(key);
-                    excelMap.set(key, row);
-                }
+                const key = `${name}_${id}`;
+                excelMap.set(key, row);
+                allExcelKeys.add(key); // 记录所有Excel键
             }
         });
     } catch (e) {
@@ -110,13 +109,13 @@
             return cell ? cell.textContent.trim() : '';
         }
 
-        const name = getCellValue(CONFIG.COLUMN_MAP.姓名);
-        const id = getCellValue(CONFIG.COLUMN_MAP.证件号).replace(/\D/g, '');
+        const name = getCellValue(CONFIG.COLUMN_MAP.姓名).toLowerCase();
+        const id = getCellValue(CONFIG.COLUMN_MAP.证件号).replace(/\D/g, '').toLowerCase();
         const salesman = getCellValue(CONFIG.COLUMN_MAP.业务员) || '未分配';
 
         if (!name || !id) return null;
 
-        const key = `${name}|${id}`;
+        const key = `${name}_${id}`;
         return {
             webData: { name, id, salesman },
             excelRow: excelMap.get(key)
@@ -138,7 +137,10 @@
             const rows = Array.from(document.querySelectorAll('tr.el-table__row'));
             const pageData = rows.map(row => extractRowData(row)).filter(Boolean);
             allRows.push(...pageData);
-            
+            console.log(`📋 当前页采集到 ${pageData.length} 条有效数据`);
+            if (pageData.length > 0) {
+              console.log('📝 示例数据:', JSON.stringify(pageData[0], null, 2));
+            }
             // 2. 下一页按钮检测
             const nextBtn = document.querySelector('.btn-next');
             const isLastPage = nextBtn && nextBtn.hasAttribute('disabled');
@@ -164,15 +166,29 @@
             console.log('🗜️ 开始生成压缩文件...');
             const zip = new JSZip();
             const salesMap = new Map();
+            
+            // 统计信息
+            let matchedCount = 0;
+            let unmatchedCount = 0;
             const uniqueKeys = new Set();
+            const matchedKeys = new Set(); // 新增：记录已匹配的键
 
             // 1. 数据去重处理
             data.forEach(item => {
-                if (!item.excelRow) return;
+                if (!item.excelRow) {
+                    unmatchedCount++;
+                    return;
+                }
                 
-                const key = `${item.webData.name}|${item.webData.id}`;
-                if (uniqueKeys.has(key)) return;
+                // 使用更可靠的键格式
+                const key = `${item.webData.name}_${item.webData.id}`;
+                if (uniqueKeys.has(key)) {
+                    console.log(`⚠️ 发现重复数据: ${key}`);
+                    return;
+                }
                 uniqueKeys.add(key);
+                matchedKeys.add(key); // 记录已匹配的键
+                matchedCount++;
                 
                 const salesman = item.webData.salesman.replace(/[/\\?%*:|"<>]/g, '_');
                 if (!salesMap.has(salesman)) {
@@ -180,7 +196,25 @@
                 }
                 salesMap.get(salesman).push(item.excelRow);
             });
+            
+            console.log(`🔍 匹配结果: ${matchedCount}条匹配, ${unmatchedCount}条未匹配`);
+            
+            // 新增：打印前10条未匹配的Excel数据
+            const unmatchedExcelKeys = [...allExcelKeys].filter(key => !matchedKeys.has(key));
+            if (unmatchedExcelKeys.length > 0) {
+                console.log("⚠️ 以下为前10条未匹配的Excel数据:");
+                unmatchedExcelKeys.slice(0, 10).forEach(key => {
+                    const row = excelMap.get(key);
+                    if (row && row.length >= 2) {
+                        console.log(`  - 姓名: ${row[0]}, 证件号: ${row[1]}`);
+                    }
+                });
+                console.log(`⚠️ 共 ${unmatchedExcelKeys.length} 条Excel数据未匹配`);
+            } else {
+                console.log("✅ 所有Excel数据均已匹配");
+            }
 
+            let all = 0;
             // 2. 生成CSV文件
             salesMap.forEach((rows, salesman) => {
                 const headerRow = '\uFEFF' + excelHeaders.join(',');
@@ -192,7 +226,10 @@
                 
                 zip.file(`${salesman}.csv`, headerRow + '\n' + dataRows);
                 console.log(`📄 生成文件: ${salesman}.csv (${rows.length}条)`);
+                all += rows.length;
             });
+            console.log(`总条数: ${all}`);
+
 
             // 3. 下载ZIP
             const blob = await zip.generateAsync({type: "blob"});
@@ -220,6 +257,7 @@
         const matchedData = await fetchAllPages();
         
         if (matchedData.length > 0) {
+            console.log(`匹配数据条数: ${matchedData.length}`);
             await generateZip(matchedData);
             console.log('🎉 文件生成完成');
             alert('✅ 数据文件已生成并下载\n任务终止运行');

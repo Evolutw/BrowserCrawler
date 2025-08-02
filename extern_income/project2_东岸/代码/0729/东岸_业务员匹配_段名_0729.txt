@@ -85,12 +85,70 @@
         DELAY: 2000,            // 翻页延迟(毫秒)
         ZIP_PREFIX: '业务员数据', // 压缩包前缀
         PAGE_SIZE: 500,          // 每页显示数量（用于计算总页数）
-        COLUMN_NAMES: {         // 页面表头名称映射
-            姓名: '姓名',
-            证件号: '证件号',
-            业务员: 'CPE'       // 修改为CPE
-        }
+        MAX_RETRY: 5,            // 最大重试次数
+        FIELD_MAPPINGS: {        // 表头映射配置（支持多个匹配名称）
+            "姓名": ["姓名", "客户名称"],
+            "证件号": ["证件号", "证件号码"],
+            "业务员": ["业务员", "客户经理", "CPE"]
+        },
+        REQUIRED_FIELDS: ["姓名", "证件号"] // 必填字段校验
     };
+
+    // ========== 工具函数 ==========
+    function waitForElement(selector, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const check = () => {
+                const element = document.querySelector(selector);
+                if (element) {
+                    resolve(element);
+                } else if (Date.now() - start > timeout) {
+                    reject(new Error(`元素加载超时: ${selector}`));
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
+    }
+
+    // ========== 核心函数 ==========
+    function createHeaderMapper() {
+        const headerCells = Array.from(document.querySelectorAll('thead th, .el-table__header th'));
+        const headers = headerCells.map(th => th.innerText.trim().replace(/\s+/g, ''));
+        
+        const mapper = {};
+        let missingFields = [];
+
+        Object.entries(CONFIG.FIELD_MAPPINGS).forEach(([fieldName, aliases]) => {
+            const foundIndex = headers.findIndex(header => 
+                aliases.some(alias => header.includes(alias))
+            );
+
+            if (foundIndex >= 0) {
+                const cell = headerCells[foundIndex];
+                const colIndex = Array.from(cell.parentNode.children).indexOf(cell) + 1;
+                
+                mapper[fieldName] = {
+                    selector: `td:nth-child(${colIndex}) .cell`,
+                    index: foundIndex,
+                    headerText: headers[foundIndex]
+                };
+            } else {
+                missingFields.push(fieldName);
+                console.warn(`未找到表头匹配: ${fieldName} (尝试匹配: ${aliases.join(', ')})`);
+            }
+        });
+
+        // 检查必填字段
+        const missingRequired = CONFIG.REQUIRED_FIELDS.filter(f => !mapper[f]);
+        if (missingRequired.length > 0) {
+            throw new Error(`缺少必要字段: ${missingRequired.join(', ')}`);
+        }
+
+        console.log('表头映射结果:', JSON.stringify(mapper, null, 2));
+        return mapper;
+    }
 
     // ========== 页数计算函数 ==========
     function calculateTotalPages() {
@@ -102,57 +160,28 @@
         return Math.ceil(total / CONFIG.PAGE_SIZE);
     }
 
-    // ========== 表头映射函数 ==========
-    function getHeaderMap() {
-        const headerRow = document.querySelector('.el-table__header-wrapper tr');
-        if (!headerRow) return null;
-        
-        const headers = Array.from(headerRow.querySelectorAll('th'));
-        const headerMap = {};
-        
-        headers.forEach((th, index) => {
-            const headerText = th.textContent.trim();
-            if (headerText) {
-                headerMap[index] = headerText;
-            }
-        });
-        
-        return headerMap;
-    }
-
     // ========== 数据提取函数 ==========
-    function extractRowData(row, headerMap) {
-        const cells = Array.from(row.querySelectorAll('td'));
-        if (!cells || cells.length === 0) return null;
+    function extractRowData(row, mapper) {
+        const data = {};
         
-        let name = '', id = '', salesman = '未分配';
-        let nameIndex = -1, idIndex = -1, salesmanIndex = -1;
-        
-        // 根据表头映射查找列索引
-        Object.entries(headerMap).forEach(([index, text]) => {
-            if (text.includes(CONFIG.COLUMN_NAMES.姓名)) nameIndex = parseInt(index);
-            if (text.includes(CONFIG.COLUMN_NAMES.证件号)) idIndex = parseInt(index);
-            if (text.includes(CONFIG.COLUMN_NAMES.业务员)) salesmanIndex = parseInt(index);
+        Object.entries(mapper).forEach(([fieldName, {selector}]) => {
+            const cell = row.querySelector(selector);
+            let value = cell?.textContent?.trim() || '';
+            
+            // 字段特定处理
+            if (fieldName === "证件号") {
+                value = value.replace(/\D/g, '');
+            }
+            
+            data[fieldName] = value;
         });
-        
-        // 提取数据
-        if (nameIndex !== -1) {
-            const cell = cells[nameIndex]?.querySelector('.cell');
-            name = cell ? cell.textContent.trim().toLowerCase() : '';
-        }
-        
-        if (idIndex !== -1) {
-            const cell = cells[idIndex]?.querySelector('.cell');
-            id = cell ? cell.textContent.trim().replace(/\D/g, '').toLowerCase() : '';
-        }
-        
-        if (salesmanIndex !== -1) {
-            const cell = cells[salesmanIndex]?.querySelector('.cell');
-            salesman = cell ? cell.textContent.trim() : '未分配';
-        }
+
+        const name = data['姓名'].toLowerCase();
+        const id = data['证件号'].toLowerCase();
+        const salesman = data['业务员'] || '未分配';
 
         if (!name || !id) return null;
-	console.log('提取的数据:', JSON.stringify(name, id, salesman));
+
         const key = `${name}_${id}`;
         return {
             webData: { name, id, salesman },
@@ -162,43 +191,54 @@
 
     // ========== 翻页抓取函数 ==========
     async function fetchAllPages() {
+        // 等待表头加载并创建映射
+        await waitForElement('thead th, .el-table__header th', 15000);
+        const headerMapper = createHeaderMapper();
+        
         const allRows = [];
         let currentPage = 1;
         const totalPages = calculateTotalPages();
         
         console.log(`📊 总页数: ${totalPages} (每页 ${CONFIG.PAGE_SIZE} 条)`);
         
-        // 获取表头映射（只需在第一次获取）
-        const headerMap = getHeaderMap();
-        if (!headerMap) {
-            throw new Error('无法获取表头信息，请检查页面结构');
-        }
-        console.log('🔖 表头映射:', headerMap);
-        
         while (currentPage <= totalPages) {
-            console.log(`⏳ 正在采集第 ${currentPage}/${totalPages} 页数据...`);
+            let retry = 0;
+            let success = false;
             
-            // 1. 获取当前页数据
-            const rows = Array.from(document.querySelectorAll('tr.el-table__row'));
-            const pageData = rows.map(row => extractRowData(row, headerMap)).filter(Boolean);
-            allRows.push(...pageData);
-            console.log(`📋 当前页采集到 ${pageData.length} 条有效数据`);
-            if (pageData.length > 0) {
-              console.log('📝 示例数据:', JSON.stringify(pageData[0], null, 2));
+            while (retry < CONFIG.MAX_RETRY) {
+                try {
+                    console.log(`[第${currentPage}页] 尝试${retry+1}/${CONFIG.MAX_RETRY}`);
+                    
+                    // 1. 获取当前页数据
+                    const rows = Array.from(document.querySelectorAll('tr.el-table__row'));
+                    const pageData = rows.map(row => extractRowData(row, headerMapper)).filter(Boolean);
+                    allRows.push(...pageData);
+                    console.log(`📋 当前页采集到 ${pageData.length} 条有效数据`);
+                    
+                    // 2. 下一页按钮检测
+                    const nextBtn = document.querySelector('.btn-next:not(.is-disabled)');
+                    const isLastPage = !nextBtn || nextBtn.classList.contains('is-disabled');
+                    
+                    if (isLastPage || currentPage >= totalPages) {
+                        console.log('🛑 已到达最后一页');
+                        return allRows;
+                    }
+                    
+                    // 3. 执行翻页
+                    currentPage++;
+                    nextBtn.click();
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY));
+                    success = true;
+                    break;
+                    
+                } catch (e) {
+                    console.warn(`[错误] ${e.message}`);
+                    if (++retry >= CONFIG.MAX_RETRY) throw e;
+                    await new Promise(r => setTimeout(r, 2000));
+                }
             }
-            // 2. 下一页按钮检测
-            const nextBtn = document.querySelector('.btn-next');
-            const isLastPage = nextBtn && nextBtn.hasAttribute('disabled');
             
-            if (isLastPage) {
-                console.log('🛑 已到达最后一页');
-                break;
-            }
-            
-            // 3. 执行翻页
-            currentPage++;
-            nextBtn.click();
-            await new Promise(resolve => setTimeout(resolve, CONFIG.DELAY));
+            if (!success) break;
         }
         
         console.log(`✅ 采集完成，共处理 ${currentPage} 页，获得 ${allRows.length} 条数据`);
