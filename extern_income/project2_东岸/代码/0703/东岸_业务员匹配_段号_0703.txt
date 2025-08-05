@@ -86,9 +86,9 @@
         ZIP_PREFIX: '业务员数据', // 压缩包前缀
         PAGE_SIZE: 500,          // 每页显示数量（用于计算总页数）
         COLUMN_MAP: {           // 页面元素class映射
-            姓名: 'el-table_2_column_8',
-            证件号: 'el-table_2_column_9',
-            业务员: 'el-table_2_column_20'
+            姓名: 'el-table_3_column_10',
+            证件号: 'el-table_3_column_11',
+            业务员: 'el-table_3_column_22'
         }
     };
 
